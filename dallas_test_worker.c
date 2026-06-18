@@ -9,6 +9,8 @@
 #include <one_wire/one_wire_host.h>
 #include <one_wire/maxim_crc.h>
 
+#include <power/power_service/power.h> // OTG (5V pin) control for the 1-Wire pull-up rail
+
 #include <math.h>
 #include <string.h>
 
@@ -21,6 +23,7 @@
 #define DALLAS_SETTLE_US         5 // idle-high settle before driving a reset
 #define DALLAS_INTERSAMPLE_US    1000 // gap between resets: bus recovery + lets BLE/USB run
 #define DALLAS_BATCH_INTERVAL_MS 120 // refresh period of the live reading
+#define DALLAS_OTG_SETTLE_MS     20 // conservative headroom for the 5V (OTG) rail to ramp up
 
 // Plausible tPDL window. Anything outside is a glitch / contact bounce and is dropped.
 #define DALLAS_TPDL_FLOOR_US 20
@@ -31,6 +34,7 @@
 struct DallasTestWorker {
     FuriThread* thread;
     OneWireHost* host;
+    Power* power; // held for the worker's lifetime; used to power the 5V (OTG) rail while testing
     DallasTestResultCallback callback;
     void* callback_ctx;
     volatile bool running;
@@ -209,6 +213,19 @@ static void dallas_run_batch(OneWireHost* host, DallasTestResult* result) {
 static int32_t dallas_test_worker_thread(void* ctx) {
     DallasTestWorker* worker = ctx;
 
+    // We drive the 1-Wire line open-drain with no internal pull-up, so the bus only recovers high
+    // via an external pull-up. Empirically that pull-up is powered from the switchable 5V (OTG)
+    // rail (it's also why the stock iButton app enables OTG to read); with it off, every released
+    // reset reads as a stuck-low bus ("Bus low"). Power the rail for the test, then restore the
+    // prior OTG *request* - only switch it back off if we were the one that turned it on. This
+    // also undoes the stock iButton Read force-disabling OTG on exit, which otherwise leaves the
+    // bus unpulled when this test is opened right after a read.
+    const bool otg_was_on = power_is_otg_enabled(worker->power);
+    if(!otg_was_on) {
+        power_enable_otg(worker->power, true);
+        furi_delay_ms(DALLAS_OTG_SETTLE_MS); // let the boost ramp the rail before measuring
+    }
+
     onewire_host_start(worker->host); // PB14 -> open-drain, idle high
 
     while(worker->running) {
@@ -220,12 +237,15 @@ static int32_t dallas_test_worker_thread(void* ctx) {
     }
 
     onewire_host_stop(worker->host); // float the pin back to analog
+
+    if(!otg_was_on) power_enable_otg(worker->power, false); // restore the rail we found
     return 0;
 }
 
 DallasTestWorker* dallas_test_worker_alloc(void) {
     DallasTestWorker* worker = malloc(sizeof(DallasTestWorker));
     worker->host = onewire_host_alloc(&gpio_ibutton);
+    worker->power = furi_record_open(RECORD_POWER);
     worker->thread = NULL;
     worker->callback = NULL;
     worker->callback_ctx = NULL;
@@ -236,6 +256,7 @@ DallasTestWorker* dallas_test_worker_alloc(void) {
 void dallas_test_worker_free(DallasTestWorker* worker) {
     furi_check(worker);
     dallas_test_worker_stop(worker);
+    furi_record_close(RECORD_POWER);
     onewire_host_free(worker->host);
     free(worker);
 }

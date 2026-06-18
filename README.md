@@ -40,6 +40,24 @@ own 1-Wire *slave* driver uses. Each batch runs 24 resets, drops glitches, takes
 then does a Read ROM (`0x33`) for FAM/CRC. Everything is **read-only** — the app never writes to
 a key.
 
+## Power & the 5V pin
+
+1-Wire is an open-drain bus: the master only ever pulls the line low and lets a pull-up restore
+it high. Empirically those reads only work while the Flipper's switchable **5V pin** is powered —
+the bus pull-up appears to be fed from it (it's also why the stock iButton app enables 5V to
+read). With the rail off, every released reset reads as a stuck-low bus and the screen shows
+**Bus low / Check contacts**.
+
+So the Test screen **powers the 5V (OTG) rail while a test is running and restores it on exit**,
+mirroring what the stock iButton app does. Nothing to configure; just note that:
+
+- the **5V GPIO pin is powered while a test is running** (relevant if you wired an external
+  pull-up — or anything else — to it);
+- if you had *5V on GPIO* enabled globally, the app leaves it on — it only switches 5V back off
+  if it was the one that turned it on; and
+- on **USB power** the charger may defer the boost, so 5V (and thus a clean read) isn't
+  guaranteed while plugged in.
+
 ## A note on "original vs clone"
 
 This tool deliberately does **not** claim an Original-Dallas / clone verdict. On the Flipper's
